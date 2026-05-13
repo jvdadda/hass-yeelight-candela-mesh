@@ -53,8 +53,26 @@ class CandelaMeshLight(LightEntity):
         self._client = client
         self._entry = entry
         self._attr_unique_id = f"{entry.entry_id}_mesh"
-        self._attr_is_on = False
-        self._attr_brightness = 0
+        # Start with state unknown — we won't claim on/off until we either
+        # successfully send a command or (later) parse a NOTIFY frame.
+        self._attr_is_on = None
+        self._attr_brightness = None
+
+    async def async_added_to_hass(self) -> None:
+        """Hook the client's connection events so the UI flips to 'unknown'
+        the moment we lose the GATT session, instead of showing a stale
+        last-commanded state forever."""
+        self._client.add_connection_listener(self._on_connection_change)
+        # Initial paint: if the client somehow already disconnected before
+        # we got here, reflect that.
+        self._on_connection_change()
+
+    def _on_connection_change(self) -> None:
+        if not self._client.is_connected:
+            self._attr_is_on = None
+            self._attr_brightness = None
+        if self.hass is not None:
+            self.async_write_ha_state()
 
     @property
     def device_info(self):
@@ -68,7 +86,21 @@ class CandelaMeshLight(LightEntity):
         }
 
     async def async_turn_on(self, **kwargs) -> None:
-        """Turn on. Optional brightness (HA 0-255 scale)."""
+        """Turn on. Optional brightness (HA 0-255 scale).
+
+        Smart-toggle behaviour: a turn_on call issued while we already
+        believe the lamps to be on (and no new brightness is supplied)
+        is treated as a turn_off. Lets the same physical/voice button
+        toggle the lamps without needing a separate 'toggle' service.
+
+        Note: this slightly bends HA's standard light.turn_on contract.
+        Automations that rely on turn_on being a strict 'set to on'
+        should call light.toggle explicitly to avoid the off-flip, or
+        always supply a brightness (which disables the smart-toggle and
+        falls through to the normal set-brightness path).
+        """
+        if self._attr_is_on and ATTR_BRIGHTNESS not in kwargs:
+            return await self.async_turn_off()
         try:
             # Always send power-on first (lamps may be off and ignore brightness alone)
             await self._client.send_power(True)
@@ -78,8 +110,8 @@ class CandelaMeshLight(LightEntity):
                 telink_b = max(1, round(ha_brightness * 100 / 255))
                 await self._client.send_brightness(telink_b)
                 self._attr_brightness = ha_brightness
-            elif self._attr_brightness == 0:
-                # Restore last brightness or default to mid
+            elif not self._attr_brightness:
+                # First on with no remembered brightness → default to mid.
                 self._attr_brightness = 128
                 await self._client.send_brightness(50)
             self._attr_is_on = True

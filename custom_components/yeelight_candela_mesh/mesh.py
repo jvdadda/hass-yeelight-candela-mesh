@@ -173,6 +173,19 @@ class TelinkMeshClient:
         self._last_cmd_at: dict[int, float] = {}  # opcode -> last send timestamp
         self._keepalive_task: asyncio.Task | None = None
         self._notify_callbacks: list = []
+        # Connection-state listeners — fired on connect success and on disconnect.
+        # Lets the LightEntity flip its state to "unknown" when we lose the GATT.
+        self._connection_listeners: list[Callable[[], None]] = []
+
+    def add_connection_listener(self, cb: Callable[[], None]) -> None:
+        self._connection_listeners.append(cb)
+
+    def _notify_connection_listeners(self) -> None:
+        for cb in self._connection_listeners:
+            try:
+                cb()
+            except Exception as e:  # noqa: BLE001
+                _LOGGER.debug("connection listener error: %s", e)
 
     @property
     def is_connected(self) -> bool:
@@ -215,6 +228,8 @@ class TelinkMeshClient:
             # Start keepalive loop (the lamp drops after ~30s, our throttle helps but eventually drops)
             if self._keepalive_task is None or self._keepalive_task.done():
                 self._keepalive_task = asyncio.create_task(self._keepalive_loop())
+        # Fire listeners outside the lock so they can call back into us safely.
+        self._notify_connection_listeners()
 
     async def disconnect(self) -> None:
         """Close the connection cleanly."""
@@ -228,6 +243,13 @@ class TelinkMeshClient:
                     pass
             self._client = None
             self._session_key = None
+        self._notify_connection_listeners()
+
+    def _invalidate_session(self) -> None:
+        """Drop the session and notify listeners. Safe to call from any context."""
+        self._client = None
+        self._session_key = None
+        self._notify_connection_listeners()
 
     async def _keepalive_loop(self) -> None:
         """Send a status_query every KEEPALIVE_INTERVAL_S to extend connection lifetime."""
@@ -240,6 +262,7 @@ class TelinkMeshClient:
                     await self._send_raw(OP_STATUS_QUERY, ADDR_BROADCAST, [16], throttle=False)
                 except Exception as e:  # noqa: BLE001
                     _LOGGER.debug("Keepalive failed: %s — connection probably dropped", e)
+                    self._invalidate_session()
                     return
         except asyncio.CancelledError:
             pass
@@ -250,8 +273,7 @@ class TelinkMeshClient:
             try:
                 await self.connect()
             except Exception:  # noqa: BLE001
-                self._client = None
-                self._session_key = None
+                self._invalidate_session()
                 raise
 
     async def _send_raw(
@@ -272,8 +294,7 @@ class TelinkMeshClient:
             await self._client.write_gatt_char(COMMAND_CHAR_UUID, pkt, response=True)
         except (BleakError, EOFError) as e:
             _LOGGER.warning("Write failed (%s), invalidating session", e)
-            self._client = None
-            self._session_key = None
+            self._invalidate_session()
             raise
 
     # === Public commands (broadcast to whole mesh by default) ===
