@@ -45,12 +45,14 @@ class CandelaMeshLight(LightEntity):
     _attr_color_mode = ColorMode.BRIGHTNESS
     _attr_supported_color_modes = {ColorMode.BRIGHTNESS}
     _attr_should_poll = False  # event-driven via NOTIFY (future); state pushed on cmd success
+    _attr_assumed_state = True  # we don't read NOTIFY frames yet — UI shows the "assumed" indicator
+    _attr_has_entity_name = True
+    _attr_name = None  # this is the device's only/main entity — display the device name as-is
 
     def __init__(self, client: TelinkMeshClient, entry: ConfigEntry):
         self._client = client
         self._entry = entry
         self._attr_unique_id = f"{entry.entry_id}_mesh"
-        self._attr_name = "Candela Mesh"
         self._attr_is_on = False
         self._attr_brightness = 0
 
@@ -59,7 +61,7 @@ class CandelaMeshLight(LightEntity):
         """Group all entities under one device."""
         return {
             "identifiers": {(DOMAIN, self._entry.entry_id)},
-            "name": "Yeelight Candela Mesh",
+            "name": self._entry.title,
             "manufacturer": "Yeelight",
             "model": "YLFW01YL (mesh group)",
             "connections": {("bluetooth", self._entry.data[CONF_GATEWAY_MAC])},
