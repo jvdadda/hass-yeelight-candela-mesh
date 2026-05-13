@@ -192,7 +192,15 @@ class TelinkMeshClient:
         return self._client is not None and self._client.is_connected and self._session_key is not None
 
     async def connect(self) -> None:
-        """Open GATT connection, pair handshake, derive session key. ~10s on Candela."""
+        """Open GATT connection, pair handshake, derive session key. ~10s on Candela.
+
+        Uses a local `client` variable throughout the handshake and only
+        assigns to `self._client` once the session is fully valid. This
+        prevents a race where another coroutine (the keepalive task,
+        a HA bluetooth-integration callback, etc.) could nullify
+        `self._client` mid-handshake while we're suspended on an
+        `await`, leading to an AttributeError on the next line.
+        """
         async with self._lock:
             if self.is_connected:
                 return
@@ -203,31 +211,41 @@ class TelinkMeshClient:
                     f"Bluetooth scanner. Power it on or move it closer."
                 )
             _LOGGER.info("Connecting to %s (mesh=%s)", self._gateway_mac, self._mesh_name.decode())
-            self._client = BleakClient(ble_device, timeout=PAIR_TIMEOUT_S)
-            await self._client.connect()
-
-            session_random = urandom(8)
-            pair_pkt = _make_pair_packet(self._mesh_name, self._mesh_password, session_random)
-            await self._client.write_gatt_char(PAIR_CHAR_UUID, pair_pkt, response=True)
-            await asyncio.sleep(0.5)
-            reply = await self._client.read_gatt_char(PAIR_CHAR_UUID)
-            if not reply or reply[0] != 0x0D:
-                code = f"0x{reply[0]:02x}" if reply else "no-reply"
-                await self._client.disconnect()
-                self._client = None
-                raise RuntimeError(
-                    f"Pair handshake failed (expected 0x0d, got {code}). "
-                    f"Check mesh_name and mesh_password."
+            client = BleakClient(ble_device, timeout=PAIR_TIMEOUT_S)
+            await client.connect()
+            try:
+                session_random = urandom(8)
+                pair_pkt = _make_pair_packet(
+                    self._mesh_name, self._mesh_password, session_random
                 )
-            response_random = bytes(reply[1:9])
-            self._session_key = _make_session_key(
-                self._mesh_name, self._mesh_password, session_random, response_random
-            )
+                await client.write_gatt_char(PAIR_CHAR_UUID, pair_pkt, response=True)
+                await asyncio.sleep(0.5)
+                reply = await client.read_gatt_char(PAIR_CHAR_UUID)
+                if not reply or reply[0] != 0x0D:
+                    code = f"0x{reply[0]:02x}" if reply else "no-reply"
+                    raise RuntimeError(
+                        f"Pair handshake failed (expected 0x0d, got {code}). "
+                        f"Check mesh_name and mesh_password."
+                    )
+                response_random = bytes(reply[1:9])
+                session_key = _make_session_key(
+                    self._mesh_name, self._mesh_password, session_random, response_random
+                )
+            except Exception:
+                try:
+                    await client.disconnect()
+                except Exception:  # noqa: BLE001
+                    pass
+                raise
+            # Atomic publish: once we set both, is_connected flips to True.
+            self._client = client
+            self._session_key = session_key
             _LOGGER.info("Paired. Session key derived.")
 
-            # Start keepalive loop (the lamp drops after ~30s, our throttle helps but eventually drops)
-            if self._keepalive_task is None or self._keepalive_task.done():
-                self._keepalive_task = asyncio.create_task(self._keepalive_loop())
+            # Cancel any stale keepalive from a previous session before starting fresh.
+            if self._keepalive_task and not self._keepalive_task.done():
+                self._keepalive_task.cancel()
+            self._keepalive_task = asyncio.create_task(self._keepalive_loop())
         # Fire listeners outside the lock so they can call back into us safely.
         self._notify_connection_listeners()
 
@@ -246,9 +264,16 @@ class TelinkMeshClient:
         self._notify_connection_listeners()
 
     def _invalidate_session(self) -> None:
-        """Drop the session and notify listeners. Safe to call from any context."""
+        """Drop the session and notify listeners. Safe to call from any context.
+
+        Also cancels the keepalive task so it can't race with a subsequent
+        reconnect (it would otherwise wake up against the new session and
+        send an out-of-band probe).
+        """
         self._client = None
         self._session_key = None
+        if self._keepalive_task and not self._keepalive_task.done():
+            self._keepalive_task.cancel()
         self._notify_connection_listeners()
 
     async def _keepalive_loop(self) -> None:
