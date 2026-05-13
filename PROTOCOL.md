@@ -310,7 +310,76 @@ writes.
 
 ---
 
-## 11. Things that are NOT possible (without new hardware)
+## 11. NOTIFY parsing — what we tried, why it doesn't work (yet)
+
+State sync would let HA know the *real* lamp state (when someone turns
+the dial physically, uses the Yeelight app, or another integration
+acts on the same mesh). The Telink protocol exposes status via two
+NOTIFY-only opcodes: `0xDB` (status response, sent in reply to a
+`0xDA` query) and `0xDC` (online status report, broadcast by lamps
+when their state changes).
+
+We attempted to subscribe to GATT NOTIFY on the Yeelight Candela
+firmware (YLFW01YL, late-2024 build) using bleak from inside HA core
+on Raspberry Pi 5 / HAOS / bluez. **Every CCCD subscribe attempt
+failed**, leaving us without a way to receive these frames. Summary:
+
+| Approach | Result |
+|---|---|
+| `start_notify(NOTIFY_CHAR_UUID = 1911)` after pair | `[org.bluez.Error.Failed] ATT 0x0e (Unlikely Error)` |
+| `start_notify(YEELIGHT_NOTIFY_CHAR_UUID = 8f65073d)` (Yeelight 0xfe87 service) after pair | same ATT 0x0e |
+| Same, but BEFORE pair handshake | `[org.bluez.Error.NotPermitted] Notify acquired` |
+| Same, with defensive `stop_notify` first | still NotPermitted / ATT 0x0e |
+| **Polling** `read_gatt_char` on the notify chars after sending `0xDA` | both chars return a 1-byte constant (`01` / `00`), not the 20-byte status frame |
+| Polling read on `COMMAND_CHAR_UUID = 1912` and other readable chars | 16-byte zeros / static bytes, never the status payload |
+
+Hypotheses for why CCCD subscribe is blocked:
+
+1. **HA's bluetooth integration acquires the notify chars itself** for
+   passive scanning purposes, and bluez refuses a second consumer.
+   `NotPermitted: Notify acquired` is the smoking gun.
+2. **The Yeelight firmware uses a non-standard CCCD encoding** (e.g.,
+   needs an authenticated/encrypted link before subscribe), which
+   bluez's stock CCCD-write fails to satisfy. ATT 0x0e is consistent
+   with this.
+3. **Bluez has stale acquisition state** that survives across HA
+   restarts and only clears on a host reboot. Confirmed: after enough
+   failed attempts, even basic GATT writes start failing and only a
+   `ha host reboot` recovers.
+
+What we know works fine *without* NOTIFY:
+
+- Pair handshake (read on `1914` after write — not via NOTIFY)
+- All command writes (`OP_POWER`, `OP_BRIGHTNESS`, etc.)
+- Multi-lamp broadcast on `0xFFFF`
+
+Approaches still worth trying for a future contributor:
+
+- **Manual CCCD descriptor write** via `client.write_gatt_descriptor`
+  with the `0x2902` CCCD descriptor + value `0x0001`, bypassing
+  bleak's `start_notify` abstraction entirely.
+- **HA `bluetooth.async_register_callback`** for advertisement data.
+  Would only help if the lamps emit status changes via BLE Adv (some
+  Telink stacks do, others don't — needs validation).
+- **A separate bleak process** outside HA's bluetooth integration's
+  acquisition (would require coordinating BT chip access — not
+  recommended).
+- **A different BLE adapter** (USB dongle) dedicated to this
+  integration, leaving the on-board chip to HA's general scanner.
+
+Until any of those land, the integration uses **optimistic state**
+with `_attr_assumed_state = True` (state shown in HA reflects the
+last command we sent, not necessarily what the lamps physically
+display) and flips to `state = unknown` whenever the GATT session
+drops, so the user knows when the displayed state is unreliable.
+
+The crypto + decode helper `_decrypt_notify()` in `mesh.py` is kept
+in tree as it'll be needed the moment any of the above paths starts
+returning bytes.
+
+---
+
+## 12. Things that are NOT possible (without new hardware)
 
 - **Sending mesh frames without GATT pair** — would require TX'ing on
   Telink's 2.4 GHz proprietary mode, which standard BLE chips can't do.
@@ -328,7 +397,7 @@ writes.
 
 ---
 
-## 12. Glossary
+## 13. Glossary
 
 - **LTK** — Long Term Key. The static 16-byte AES key derived from the
   factory mesh credentials. Rotated by the official app on first pair.
