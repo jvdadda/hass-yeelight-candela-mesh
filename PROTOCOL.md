@@ -384,6 +384,37 @@ Approaches still worth trying for a future contributor:
   proof-of-concept).
 - **A different BLE adapter** (USB dongle) dedicated to this
   integration, leaving the on-board chip to HA's general scanner.
+- **ESPHome BLE proxy** — a cheap ESP32 flashed with the bluetooth
+  proxy firmware, advertised to HA. The ESP's BLE stack is not bluez;
+  it doesn't have the acquisition issue. Same one-time hardware cost
+  as a USB dongle (~5 €).
+
+### Independent confirmation (`hcoohb/hass-yeelight-bt`)
+
+The pre-existing alternative integration `hass-yeelight-bt` (which
+uses the *Yeelight per-lamp* protocol on chars `aa7d3f34` /
+`8f65073d`, not the Telink mesh protocol we use) hit **the exact
+same bug** and explicitly skips `start_notify` for Candela on bluez:
+
+```python
+if self._model == MODEL_CANDELA and self._is_client_bluez:
+    # It may be that on bluez the notification request is not
+    # sent properly. Not sure on esp... so only apply to bluez
+```
+
+They write commands blindly and rely on optimistic state, exactly
+like we do. This is a strong signal that the limitation is genuinely
+fundamental to the **Candela firmware × bluez** combination, not
+something we're missing in our implementation. ESP32 proxy is the
+known-good workaround per their comment.
+
+The official Yeelight Android app uses the standard Android
+`setCharacteristicNotification` + `writeDescriptor(ENABLE_NOTIFICATION_VALUE)`
+path (decompiled APK: `com.yeelight.yeelib.device.connections.ConnectionBase`)
+— so there's nothing exotic on the lamp side. The breakage is
+between bluez and the Candela firmware's CCCD handling.
+
+---
 
 Until any of those land, the integration uses **optimistic state**
 with `_attr_assumed_state = True` (state shown in HA reflects the
