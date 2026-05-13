@@ -279,7 +279,16 @@ class TelinkMeshClient:
     async def _send_raw(
         self, opcode: int, dest_addr: int, params: list[int] | bytes, throttle: bool = True
     ) -> None:
-        """Send an encrypted Telink Mesh command. Auto-throttle per opcode."""
+        """Send an encrypted Telink Mesh command. Auto-throttle per opcode.
+
+        Resilience: bleak's `is_connected` flag is not always synchronous
+        with the underlying bluez transport — bluez can drop the link
+        without bleak noticing, so the first write surfaces a fresh
+        BleakError ('Not connected', 'org.bluez.Error.Failed', etc.)
+        even though we just checked is_connected. We catch that, invalidate
+        the session, transparently re-pair, and retry the write once. The
+        user sees a one-off ~10s delay instead of a service-call error.
+        """
         if throttle:
             now = asyncio.get_event_loop().time() * 1000
             last = self._last_cmd_at.get(opcode, 0)
@@ -288,14 +297,24 @@ class TelinkMeshClient:
                 await asyncio.sleep(wait / 1000)
             self._last_cmd_at[opcode] = asyncio.get_event_loop().time() * 1000
 
-        await self._ensure_connected()
-        pkt = _make_command_packet(self._session_key, self._gateway_mac, dest_addr, opcode, bytes(params))
-        try:
-            await self._client.write_gatt_char(COMMAND_CHAR_UUID, pkt, response=True)
-        except (BleakError, EOFError) as e:
-            _LOGGER.warning("Write failed (%s), invalidating session", e)
-            self._invalidate_session()
-            raise
+        for attempt in (1, 2):
+            await self._ensure_connected()
+            # New seq on every attempt — never reuse a counter under a fresh
+            # session, otherwise the lamp's anti-replay drops the frame.
+            pkt = _make_command_packet(
+                self._session_key, self._gateway_mac, dest_addr, opcode, bytes(params)
+            )
+            try:
+                await self._client.write_gatt_char(COMMAND_CHAR_UUID, pkt, response=True)
+                return
+            except (BleakError, EOFError) as e:
+                _LOGGER.warning(
+                    "Write failed on attempt %d (%s); invalidating session%s",
+                    attempt, e, " and retrying" if attempt == 1 else "",
+                )
+                self._invalidate_session()
+                if attempt == 2:
+                    raise
 
     # === Public commands (broadcast to whole mesh by default) ===
 
