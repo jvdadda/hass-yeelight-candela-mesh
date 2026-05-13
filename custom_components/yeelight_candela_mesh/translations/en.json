@@ -1,0 +1,30 @@
+{
+  "config": {
+    "step": {
+      "user": {
+        "title": "Yeelight Candela Mesh",
+        "description": "Pick a Candela to use as the mesh gateway. Default credentials work for lamps that have NOT been re-paired in Mi Home / Yeelight app.\n\nDefault mesh name: `{default_name}`\nDefault mesh password: `{default_password}`",
+        "data": {
+          "gateway_mac": "Gateway lamp",
+          "mesh_name": "Mesh name (16 chars max)",
+          "mesh_password": "Mesh password (16 chars max)"
+        }
+      },
+      "bluetooth_confirm": {
+        "title": "Yeelight Candela detected",
+        "description": "Set up the mesh credentials for this Candela network.",
+        "data": {
+          "mesh_name": "Mesh name",
+          "mesh_password": "Mesh password"
+        }
+      }
+    },
+    "abort": {
+      "no_devices_found": "No Yeelight Candela visible. Power on at least one lamp.",
+      "already_configured": "This Candela is already configured."
+    },
+    "error": {
+      "auth_failed": "Pair handshake failed. Check mesh name and password."
+    }
+  }
+}
