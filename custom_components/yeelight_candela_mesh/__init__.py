@@ -28,14 +28,25 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     mesh_name = entry.data[CONF_MESH_NAME]
     mesh_password = entry.data[CONF_MESH_PASSWORD]
 
-    ble_device = bluetooth.async_ble_device_from_address(hass, gateway_mac, connectable=True)
-    if ble_device is None:
+    def get_device():
+        """Resolve a fresh BLEDevice for the gateway MAC.
+
+        Re-resolved on every reconnect because HA's bluetooth integration
+        ages out devices that haven't been seen by any scanner recently
+        (~60s window). Holding the BLEDevice object captured at setup
+        time would yield a stale reference and bleak would fail with
+        'No backend with an available connection slot that can reach
+        address X' as soon as the lamp drifted out of the cache.
+        """
+        return bluetooth.async_ble_device_from_address(hass, gateway_mac, connectable=True)
+
+    if get_device() is None:
         raise ConfigEntryNotReady(
             f"Yeelight Candela gateway lamp {gateway_mac} not visible. "
             f"Power on at least one Candela on the same mesh network."
         )
 
-    client = TelinkMeshClient(ble_device, gateway_mac, mesh_name, mesh_password)
+    client = TelinkMeshClient(get_device, gateway_mac, mesh_name, mesh_password)
     try:
         await client.connect()
     except Exception as e:

@@ -15,6 +15,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import struct
+from collections.abc import Callable
 from os import urandom
 
 from bleak import BleakClient
@@ -154,8 +155,14 @@ class TelinkMeshClient:
     at COMMAND_THROTTLE_MS to avoid overflowing the BLE FIFO.
     """
 
-    def __init__(self, ble_device: BLEDevice, gateway_mac: str, mesh_name: str, mesh_password: str):
-        self._ble_device = ble_device
+    def __init__(
+        self,
+        get_device: Callable[[], BLEDevice | None],
+        gateway_mac: str,
+        mesh_name: str,
+        mesh_password: str,
+    ):
+        self._get_device = get_device
         self._gateway_mac = gateway_mac
         self._mesh_name = mesh_name.encode()
         self._mesh_password = mesh_password.encode()
@@ -176,8 +183,14 @@ class TelinkMeshClient:
         async with self._lock:
             if self.is_connected:
                 return
+            ble_device = self._get_device()
+            if ble_device is None:
+                raise RuntimeError(
+                    f"Gateway lamp {self._gateway_mac} is not visible to any "
+                    f"Bluetooth scanner. Power it on or move it closer."
+                )
             _LOGGER.info("Connecting to %s (mesh=%s)", self._gateway_mac, self._mesh_name.decode())
-            self._client = BleakClient(self._ble_device, timeout=PAIR_TIMEOUT_S)
+            self._client = BleakClient(ble_device, timeout=PAIR_TIMEOUT_S)
             await self._client.connect()
 
             session_random = urandom(8)
