@@ -88,19 +88,13 @@ class CandelaMeshLight(LightEntity):
     async def async_turn_on(self, **kwargs) -> None:
         """Turn on. Optional brightness (HA 0-255 scale).
 
-        Smart-toggle behaviour: a turn_on call issued while we already
-        believe the lamps to be on (and no new brightness is supplied)
-        is treated as a turn_off. Lets the same physical/voice button
-        toggle the lamps without needing a separate 'toggle' service.
-
-        Note: this slightly bends HA's standard light.turn_on contract.
-        Automations that rely on turn_on being a strict 'set to on'
-        should call light.toggle explicitly to avoid the off-flip, or
-        always supply a brightness (which disables the smart-toggle and
-        falls through to the normal set-brightness path).
+        Always sends power=ON, even when we already believe the lamps to
+        be on. We tried a 'smart-toggle' variant (turn_on while is_on →
+        turn_off) but it only works if our optimistic state matches
+        reality, and without NOTIFY parsing we can't trust that —
+        leading to user-visible bugs where 'on' silently flipped them
+        off. Standard HA contract is simpler and predictable.
         """
-        if self._attr_is_on and ATTR_BRIGHTNESS not in kwargs:
-            return await self.async_turn_off()
         try:
             # Always send power-on first (lamps may be off and ignore brightness alone)
             await self._client.send_power(True)
