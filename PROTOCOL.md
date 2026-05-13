@@ -353,17 +353,35 @@ What we know works fine *without* NOTIFY:
 - All command writes (`OP_POWER`, `OP_BRIGHTNESS`, etc.)
 - Multi-lamp broadcast on `0xFFFF`
 
+Approaches tried, with results:
+
+- **HA `bluetooth.async_register_callback`** for advertisement data
+  (active scanning) — *tested, dead end*. The Yeelight Candelas only
+  beacon their identity in BLE Adv: vendor `0x0164` + a 27-byte
+  scan-response payload `64 01 d6 ae c0 41 01 00 00 d6 00 + ASCII
+  "yl_candela" + zero-padding`. **Constant** across hours of
+  observation, regardless of physical state changes. Status is not
+  exposed via BLE Adv on this firmware.
+- **`start_notify` retry on a freshly-rebooted Pi** — *tested, still
+  hangs*. After a clean `ha host reboot` the bluez stack is fresh,
+  but `await client.start_notify(...)` hangs (~30 s) before HA's
+  setup-retry timer kicks in. Consistent across both candidate
+  notify chars (Telink `1911` and Yeelight `8f65073d`). The hang
+  likely reflects HA's bluetooth integration having acquired the
+  char for its own use, then refusing a second consumer at the
+  bluez level (NotPermitted: Notify acquired).
+
 Approaches still worth trying for a future contributor:
 
 - **Manual CCCD descriptor write** via `client.write_gatt_descriptor`
   with the `0x2902` CCCD descriptor + value `0x0001`, bypassing
-  bleak's `start_notify` abstraction entirely.
-- **HA `bluetooth.async_register_callback`** for advertisement data.
-  Would only help if the lamps emit status changes via BLE Adv (some
-  Telink stacks do, others don't — needs validation).
+  bleak's `start_notify` abstraction entirely. Hard rate-limit
+  required (one attempt per HA restart cycle, no retry loops, or
+  bluez state corrupts and only `ha host reboot` recovers).
 - **A separate bleak process** outside HA's bluetooth integration's
   acquisition (would require coordinating BT chip access — not
-  recommended).
+  recommended for a HACS integration but may work for a one-shot
+  proof-of-concept).
 - **A different BLE adapter** (USB dongle) dedicated to this
   integration, leaving the on-board chip to HA's general scanner.
 
