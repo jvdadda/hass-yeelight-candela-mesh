@@ -65,10 +65,6 @@ class CandelaMeshLight(LightEntity):
             "connections": {("bluetooth", self._entry.data[CONF_GATEWAY_MAC])},
         }
 
-    @property
-    def available(self) -> bool:
-        return self._client.is_connected
-
     async def async_turn_on(self, **kwargs) -> None:
         """Turn on. Optional brightness (HA 0-255 scale)."""
         try:

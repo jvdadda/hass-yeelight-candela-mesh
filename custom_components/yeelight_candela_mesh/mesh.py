@@ -256,7 +256,7 @@ class TelinkMeshClient:
         await self._ensure_connected()
         pkt = _make_command_packet(self._session_key, self._gateway_mac, dest_addr, opcode, bytes(params))
         try:
-            await self._client.write_gatt_char(COMMAND_CHAR_UUID, pkt, response=False)
+            await self._client.write_gatt_char(COMMAND_CHAR_UUID, pkt, response=True)
         except (BleakError, EOFError) as e:
             _LOGGER.warning("Write failed (%s), invalidating session", e)
             self._client = None
