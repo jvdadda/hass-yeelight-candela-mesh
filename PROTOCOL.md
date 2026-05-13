@@ -422,9 +422,10 @@ last command we sent, not necessarily what the lamps physically
 display) and flips to `state = unknown` whenever the GATT session
 drops, so the user knows when the displayed state is unreliable.
 
-The crypto + decode helper `_decrypt_notify()` in `mesh.py` is kept
-in tree as it'll be needed the moment any of the above paths starts
-returning bytes.
+A future contributor cracking this should add a `_decrypt_notify()`
+helper to `mesh.py` that mirrors `_make_command_packet()` — the
+AES-CTR-style XOR is symmetric (its own inverse), the MIC is verified
+the same way, and the wire layout is identical. About 30 lines.
 
 ---
 

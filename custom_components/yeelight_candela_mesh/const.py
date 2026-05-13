@@ -14,11 +14,6 @@ COMMAND_CHAR_UUID = "00010203-0405-0607-0809-0a0b0c0d1912"
 NOTIFY_CHAR_UUID = "00010203-0405-0607-0809-0a0b0c0d1911"
 OTA_CHAR_UUID = "00010203-0405-0607-0809-0a0b0c0d1913"
 
-# Yeelight-specific notify char (under the 0xfe87 service). Observed via GATT
-# discovery on a YLFW01YL. Subscribing to the generic Telink notify char (1911)
-# fails with ATT 0x0e on this firmware; we fall back to this one.
-YEELIGHT_NOTIFY_CHAR_UUID = "8f65073d-9f57-4aaa-afea-397d19d5bbeb"
-
 # Yeelight advertising service (presence beacon)
 YEELIGHT_AD_SERVICE_UUID = "0000fe87-0000-1000-8000-00805f9b34fb"
 

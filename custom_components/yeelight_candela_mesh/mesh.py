@@ -27,7 +27,6 @@ from .const import (
     PAIR_CHAR_UUID,
     COMMAND_CHAR_UUID,
     NOTIFY_CHAR_UUID,
-    YEELIGHT_NOTIFY_CHAR_UUID,
     ADDR_BROADCAST,
     OP_POWER,
     OP_BRIGHTNESS,
@@ -102,42 +101,6 @@ def _make_session_key(
     m_p = bytearray(mesh_password.ljust(16, b"\x00"))
     name_pass = bytearray(a ^ b for a, b in zip(m_n, m_p))
     return bytes(_aes_ecb(bytes(name_pass), rnd))
-
-
-def _decrypt_notify(session_key: bytes, gateway_mac: str, frame: bytes) -> tuple[int, int, int, bytes] | None:
-    """Decrypt and parse a 20-byte NOTIFY frame from the lamp.
-
-    Returns (src_mesh_addr, opcode, dest_mesh_addr, params_15B) or None if
-    the MIC check fails. Symmetric with _make_command_packet — same nonce
-    construction (using the GATT-paired gateway's MAC) and same
-    AES-CTR-style XOR which is its own inverse.
-
-    Wire layout (same as TX): [seq:3 clear] [MIC:2 clear] [encrypted:15]
-    Decrypted payload: [src:2 LE] [opcode|0xC0:1] [vendor:2] [params:10]
-    """
-    if len(frame) != 20:
-        return None
-    seq = frame[:3]
-    mic_rx = frame[3:5]
-    ciphertext = frame[5:20]
-
-    mac_bytes = bytearray.fromhex(gateway_mac.replace(":", ""))
-    mac_bytes.reverse()
-    nonce = bytes(mac_bytes[:4]) + b"\x01" + bytes(seq)
-
-    plaintext = bytes(_crypt_payload(session_key, nonce, ciphertext))
-    mic_calc = _make_checksum(session_key, nonce, plaintext)[:2]
-    if bytes(mic_calc) != bytes(mic_rx):
-        return None  # not for us, or wrong key, or corrupted
-
-    src_addr = int.from_bytes(plaintext[0:2], "little")
-    opcode = plaintext[2] & 0x3F  # strip vendor bits 7-6
-    # plaintext[3:5] = vendor bytes (skipped)
-    params = plaintext[5:15]
-    # The opcode byte's vendor flag is mostly carried; for some opcodes a
-    # 'dst' field is encoded in the second byte after vendor — but in our
-    # use case (status responses) we mostly care about opcode + params.
-    return (src_addr, opcode, 0, params)
 
 
 def _make_command_packet(
@@ -250,11 +213,6 @@ class TelinkMeshClient:
             _LOGGER.info("Connecting to %s (mesh=%s)", self._gateway_mac, self._mesh_name.decode())
             client = BleakClient(ble_device, timeout=PAIR_TIMEOUT_S)
             await client.connect()
-            # NOTE: GATT NOTIFY subscription is unreliable on this firmware —
-            # bluez returns ATT 0x0e on the Telink notify char (1911) and
-            # 'NotPermitted: Notify acquired' on the Yeelight one (8f65073d).
-            # We use polling instead (read_gatt_char on the notify chars
-            # after sending STATUS_QUERY) — see _poll_status() below.
             try:
                 session_random = urandom(8)
                 pair_pkt = _make_pair_packet(
@@ -284,7 +242,6 @@ class TelinkMeshClient:
             self._session_key = session_key
             _LOGGER.info("Paired. Session key derived.")
 
-
             # Cancel any stale keepalive from a previous session before starting fresh.
             if self._keepalive_task and not self._keepalive_task.done():
                 self._keepalive_task.cancel()
@@ -305,55 +262,6 @@ class TelinkMeshClient:
             self._client = None
             self._session_key = None
         self._notify_connection_listeners()
-
-    async def poll_status_once(self) -> None:
-        """Send STATUS_QUERY then poll-read the notify chars and log.
-
-        This is the polling fallback because GATT NOTIFY subscription is
-        blocked on this firmware. We read both candidate notify chars
-        (Telink 1911 + Yeelight 8f65073d) right after sending the query
-        and log whatever we find.
-
-        Phase 1 of the polling probe: just observe what comes back so
-        we can decide which char carries the real status payload and
-        whether the bytes decrypt cleanly.
-        """
-        if not self.is_connected:
-            return
-        # Send a status_query (broadcast = ask everyone on the mesh)
-        try:
-            await self._send_raw(OP_STATUS_QUERY, ADDR_BROADCAST, [16], throttle=False)
-        except Exception as e:  # noqa: BLE001
-            _LOGGER.debug("poll_status: STATUS_QUERY write failed: %s", e)
-            return
-        await asyncio.sleep(0.4)
-        # Try reading every char that has 'read' in its props — see if the
-        # lamp wrote the 20-byte status reply to any of them.
-        for char_uuid in (
-            NOTIFY_CHAR_UUID,
-            YEELIGHT_NOTIFY_CHAR_UUID,
-            COMMAND_CHAR_UUID,
-            "00010203-0405-0607-0809-0a0b0c0d1913",  # OTA
-            "aa7d3f34-2d4f-41e0-807f-52fbf8cf7443",  # Yeelight unknown
-        ):
-            try:
-                data = await self._client.read_gatt_char(char_uuid)
-            except Exception as e:  # noqa: BLE001
-                _LOGGER.warning("poll_status: read %s failed: %s", char_uuid, e)
-                continue
-            raw = bytes(data)
-            _LOGGER.warning("poll_status: read %s raw=%s len=%d", char_uuid, raw.hex(), len(raw))
-            sk = self._session_key
-            if sk and len(raw) == 20:
-                decoded = _decrypt_notify(sk, self._gateway_mac, raw)
-                if decoded:
-                    src, opcode, _dst, params = decoded
-                    _LOGGER.warning(
-                        "poll_status: DECRYPTED src=0x%04x op=0x%02x params=%s",
-                        src, opcode, params.hex(),
-                    )
-                else:
-                    _LOGGER.warning("poll_status: MIC verify failed on %s", char_uuid)
 
     def _invalidate_session(self) -> None:
         """Drop the session and notify listeners. Safe to call from any context.
